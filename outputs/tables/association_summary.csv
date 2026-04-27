@@ -1,0 +1,4 @@
+"variable","test","p_value","effect_size_name","effect_size","min_expected"
+"OncoTree top 12 + Other","Chi-square",4.02465072923613e-233,"Cramer's V",0.248066063954833,0.234514998052201
+"Metastatic site top 8 + Other","Chi-square",1.77755828014861e-19,"Cramer's V",0.0890805895886438,0.490845344760421
+"TMB","Kruskal-Wallis",5.74281150045184e-99,"epsilon-squared",0.0895525610867669,NA

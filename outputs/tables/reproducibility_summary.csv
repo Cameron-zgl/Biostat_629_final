@@ -1,0 +1,7 @@
+"item","value"
+"Random seed","set.seed(1)"
+"Raw data source","cBioPortal DataHub MSK-CHORD GitHub raw URLs"
+"Final overlap cohort size","5134"
+"PC dimension used for clustering","50"
+"Cumulative variance at 50 PCs","0.329"
+"Final K","5"

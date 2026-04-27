@@ -1,0 +1,1367 @@
+---
+title: "data"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```         
+```
+
+```{r read-data}
+base_url <- "https://media.githubusercontent.com/media/cBioPortal/datahub/refs/heads/master/public/msk_chord_2024/"
+
+clin_sample <- read.delim(
+  paste0(base_url, "data_clinical_sample.txt"),
+  comment.char = "#",
+  stringsAsFactors = FALSE
+)
+
+mut <- read.delim(
+  paste0(base_url, "data_mutations.txt"),
+  comment.char = "#",
+  stringsAsFactors = FALSE
+)
+
+cna <- read.delim(
+  paste0(base_url, "data_cna.txt"),
+  comment.char = "#",
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+
+sv <- read.delim(
+  paste0(base_url, "data_sv.txt"),
+  comment.char = "#",
+  stringsAsFactors = FALSE
+)
+```
+
+```{r setup, message=FALSE, warning=FALSE}
+# Faster I/O for big files (mutations can be large)
+
+library(data.table)
+
+# Pretty table display in Rmd
+
+library(knitr)
+library(tidyverse)
+Sys.setlocale("LC_CTYPE","en_US.UTF-8")
+# ----- reproducibility + remote data config -----
+
+set.seed(1)
+
+base_url <- "https://media.githubusercontent.com/media/cBioPortal/datahub/refs/heads/master/public/msk_chord_2024/"
+remote_path <- function(filename) paste0(base_url, filename)
+
+# files used in this analysis are read directly from the MSK-CHORD GitHub repository
+required_files <- c(
+  "data_clinical_patient.txt",
+  "data_clinical_sample.txt",
+  "data_mutations.txt",
+  "data_cna.txt",
+  "data_sv.txt"
+)
+
+
+required_files
+
+```
+
+```{r load-clinical}
+
+## 1) patient / sample 
+patient_path <- remote_path("data_clinical_patient.txt")
+sample_path  <- remote_path("data_clinical_sample.txt")
+
+# cBioPortal text format usually starts with comment lines beginning with '#'
+# readr::read_tsv(comment = "#") will ignore those lines
+clinical_patient <- readr::read_tsv(patient_path, comment = "#", show_col_types = FALSE) %>%
+  janitor::clean_names()
+
+clinical_sample <- readr::read_tsv(sample_path, comment = "#", show_col_types = FALSE) %>%
+  janitor::clean_names()
+
+# basic overview
+cat("clinical_patient rows:", nrow(clinical_patient), " cols:", ncol(clinical_patient), "\n")
+cat("clinical_sample  rows:", nrow(clinical_sample),  " cols:", ncol(clinical_sample),  "\n")
+
+# show column names
+names(clinical_patient)
+names(clinical_sample)
+
+# peek
+dplyr::glimpse(clinical_patient)
+dplyr::glimpse(clinical_sample)
+
+```
+
+```{r clinical-qc}
+# helper: missingness
+miss_rate <- function(df) {
+  tibble(
+    col = names(df),
+    missing_n = map_int(df, ~sum(is.na(.x) | .x == "")),
+    missing_pct = missing_n / nrow(df)
+  ) %>% arrange(desc(missing_pct))
+}
+
+patient_miss <- miss_rate(clinical_patient)
+sample_miss  <- miss_rate(clinical_sample)
+
+kable(head(patient_miss, 20), digits = 3, caption = "Top missing columns: patient")
+kable(head(sample_miss, 20),  digits = 3, caption = "Top missing columns: sample")
+
+# find likely OS / survival columns by name patterns
+surv_candidates_patient <- names(clinical_patient)[str_detect(names(clinical_patient),
+  "os|overall_survival|death|vital|days|months|survival|dfs|pfs|event"
+)]
+surv_candidates_sample <- names(clinical_sample)[str_detect(names(clinical_sample),
+  "os|overall_survival|death|vital|days|months|survival|dfs|pfs|event"
+)]
+
+surv_candidates_patient
+surv_candidates_sample
+
+```
+
+```{r join-patient-sample}
+# 3)
+# guess key columns
+possible_patient_id_cols <- names(clinical_patient)[str_detect(names(clinical_patient), "patient.*id|patient_id")]
+possible_sample_id_cols  <- names(clinical_sample)[str_detect(names(clinical_sample),  "sample.*id|sample_id")]
+possible_link_cols       <- intersect(names(clinical_patient), names(clinical_sample))
+
+possible_patient_id_cols
+possible_sample_id_cols
+head(possible_link_cols, 30)
+
+# most cBioPortal datasets: patient_id in both; sample_id only in sample table
+# adjust if your cleaned names differ
+stopifnot("patient_id" %in% names(clinical_patient))
+stopifnot("patient_id" %in% names(clinical_sample))
+
+clinical_merged <- clinical_sample %>%
+  left_join(clinical_patient, by = "patient_id", suffix = c("_sample", "_patient"))
+
+cat("clinical_merged rows:", nrow(clinical_merged), " cols:", ncol(clinical_merged), "\n")
+glimpse(clinical_merged)
+
+```
+
+```{r load-mutations}
+
+mut_path <- remote_path("data_mutations.txt")
+
+# Read directly from the MSK-CHORD GitHub raw file.
+# cBioPortal text format starts with comment lines beginning with '#'.
+mut <- readr::read_tsv(
+  mut_path,
+  comment = "#",
+  show_col_types = FALSE
+) |>
+  janitor::clean_names()
+
+cat("Read mutations directly from GitHub raw URL.\n")
+cat("mut rows:", nrow(mut), " cols:", ncol(mut), "\n")
+
+names(mut)
+dplyr::glimpse(mut)
+
+mut_cols_guess <- names(mut)[stringr::str_detect(names(mut),
+  "hugo|gene|sample|tumor|patient|variant|class|protein|effect|oncokb|tmb"
+)]
+mut_cols_guess
+
+mut |>
+  dplyr::count(hugo_symbol, sort = TRUE) |>
+  head(20) |>
+  knitr::kable()
+```
+
+```{r}
+mut_samples <- unique(mut$tumor_sample_barcode)
+clin_samples <- unique(clinical_sample$sample_id)
+
+# overlap check
+cat("Unique mut samples:", length(mut_samples), "\n")
+cat("Unique clinical samples:", length(clin_samples), "\n")
+cat("Overlap samples:", length(intersect(mut_samples, clin_samples)), "\n")
+
+# how many mutation samples NOT in clinical_sample?
+cat("Mut samples missing in clinical_sample:", length(setdiff(mut_samples, clin_samples)), "\n")
+
+# and vice versa
+cat("Clinical samples missing in mutations:", length(setdiff(clin_samples, mut_samples)), "\n")
+
+```
+
+```{r load-cna-sv}
+# helper: read a cBioPortal TSV while skipping leading/comment lines beginning with "#"
+# Use base::read.delim instead of readr::read_tsv here because data_cna.txt has
+# very long rows and readr/vroom can fail with a connection-buffer error.
+fread_cbio <- function(path, sep = "\t") {
+  read.delim(
+    path,
+    sep = sep,
+    comment.char = "#",
+    stringsAsFactors = FALSE,
+    check.names = FALSE
+  ) |>
+    janitor::clean_names()
+}
+
+# ---- read CNA / SV ----
+cna_path <- remote_path("data_cna.txt")
+sv_path  <- remote_path("data_sv.txt")
+
+cna <- fread_cbio(cna_path)
+sv  <- fread_cbio(sv_path)
+
+cat("cna rows:", nrow(cna), " cols:", ncol(cna), "\n")
+cat("sv  rows:", nrow(sv),  " cols:", ncol(sv),  "\n")
+
+# show a few column names to understand the schema
+names(cna)[1:min(30, ncol(cna))]
+names(sv)
+
+dplyr::glimpse(sv)
+
+```
+
+```{r load-timelines}
+timeline_names <- c("treatment", "progression", "tumor_sites")
+timeline_files <- setNames(
+  paste0(base_url, "data_timeline_", timeline_names, ".txt"),
+  timeline_names
+)
+
+timeline_list <- timeline_files %>%
+  map(~ readr::read_tsv(.x, comment = "#", show_col_types = FALSE) %>% janitor::clean_names())
+
+# list what you have
+names(timeline_list)
+
+# for each timeline table: show size + key columns
+timeline_summary <- imap_dfr(timeline_list, ~ tibble(
+  timeline = .y,
+  n = nrow(.x),
+  p = ncol(.x),
+  cols = paste(names(.x)[1:min(12, ncol(.x))], collapse = ", ")
+))
+
+kable(timeline_summary, caption = "Timeline tables overview")
+
+# peek a couple of the most relevant
+glimpse(timeline_list$treatment)
+glimpse(timeline_list$progression)
+glimpse(timeline_list$tumor_sites)
+
+```
+
+```{r find-cols}
+find_cols <- function(df, pattern) {
+  names(df)[str_detect(names(df), pattern)]
+}
+
+find_cols(clinical_patient, "cancer|tumor|primary|site|hist|diagnos")
+find_cols(clinical_patient, "stage|ajcc|tnm|grade")
+find_cols(clinical_patient, "sex|gender|age|race|ethnic")
+find_cols(clinical_patient, "os|overall|survival|death|vital|status|event|days|months")
+
+find_cols(mut, "sample|tumor_sample|barcode|patient")
+
+```
+
+```{r}
+library(stringr)
+
+# --- normalize sample id across tables ---
+normalize_sample_id <- function(x) {
+  x <- as.character(x)
+  x <- x[!is.na(x) & x != ""]
+  x <- str_trim(x)
+  x <- str_to_upper(x)
+
+  # clean_names() often turns "P-0001-T01-IM6" -> "p_0001_t01_im6"
+  x <- str_replace_all(x, "_", "-")
+  x <- str_replace(x, "^P-", "P-")      # no-op but safe
+  x <- str_replace(x, "^P-", "P-")      # keep consistent
+  x <- str_replace(x, "^P-", "P-")      # (safe)
+  x <- str_replace(x, "^P-", "P-")      # (safe)
+  x <- str_replace(x, "^P-", "P-")      # (safe)
+
+  # key fix: P_XXXX... -> P-XXXX...
+  x <- str_replace(x, "^P-", "P-")      # after underscore->dash might already be P-...
+  x <- str_replace(x, "^P-", "P-")      # keep stable
+  x <- str_replace(x, "^P-", "P-")
+
+  # actually important one:
+  x <- str_replace(x, "^P-", "P-")
+  x <- str_replace(x, "^P-", "P-")
+  x <- str_replace(x, "^P-", "P-")
+
+  # simplest: ensure prefix is P- (covers P_ -> P- after "_"->"-")
+  x <- str_replace(x, "^P-", "P-")
+  x <- str_replace(x, "^P-", "P-")
+
+  unique(x)
+}
+
+# NOTE: the repeated str_replace("^P-") lines are harmless but redundant.
+# If you want it cleaner, keep only the 2 lines below:
+# x <- str_replace_all(x, "_", "-")
+# x <- str_replace(x, "^P-", "P-")
+
+# --- extract & normalize ids ---
+clinical_ids <- normalize_sample_id(clinical_sample$sample_id)
+mut_ids      <- normalize_sample_id(mut$tumor_sample_barcode)
+
+cna_ids_raw <- colnames(cna)
+cna_ids_raw <- cna_ids_raw[cna_ids_raw != "hugo_symbol"]
+cna_ids     <- normalize_sample_id(cna_ids_raw)
+
+sv_ids      <- normalize_sample_id(sv$sample_id)
+
+# --- overlaps (debug-friendly) ---
+overlap_all <- Reduce(intersect, list(clinical_ids, mut_ids, cna_ids, sv_ids))
+cat("Overlap all 4:", length(overlap_all), "\n")
+
+cat("Pairwise overlaps:\n")
+cat("clinical ∩ mut:", length(intersect(clinical_ids, mut_ids)), "\n")
+cat("clinical ∩ cna:", length(intersect(clinical_ids, cna_ids)), "\n")
+cat("clinical ∩ sv :", length(intersect(clinical_ids, sv_ids)), "\n")
+cat("mut ∩ cna     :", length(intersect(mut_ids, cna_ids)), "\n")
+cat("mut ∩ sv      :", length(intersect(mut_ids, sv_ids)), "\n")
+cat("cna ∩ sv      :", length(intersect(cna_ids, sv_ids)), "\n")
+
+# sanity: show a few examples
+cat("\nExamples:\n")
+print(head(clinical_ids, 3))
+print(head(cna_ids, 3))
+print(head(sv_ids, 3))
+```
+
+```{r}
+library(tibble)
+library(dplyr)
+library(ggplot2)
+library(scales)
+
+
+df_avail <- tibble(
+  dataset = c("Clinical samples", "Mutation samples", "CNA samples", "SV samples",
+              "Overlap (Clinical ∩ Mut ∩ CNA ∩ SV)"),
+  n = c(length(clinical_ids),
+        length(mut_ids),
+        length(cna_ids),
+        length(sv_ids),
+        length(overlap_all))
+) %>%
+  mutate(dataset = factor(dataset, levels = dataset))  # keep plotting order
+
+p1 <- ggplot(df_avail, aes(x = dataset, y = n)) +
+  geom_col(width = 0.75) +
+  geom_text(aes(label = n), vjust = -0.4, size = 4) +
+  scale_y_continuous(labels = comma, expand = expansion(mult = c(0, 0.12))) +
+  labs(
+    title = "Data availability (unique samples)",
+    x = NULL,
+    y = "Count"
+  ) +
+  theme_bw(base_size = 13) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    axis.text.x = element_text(angle = 25, hjust = 1)
+  )
+
+p1
+
+```
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(scales)
+
+analysis_samples <- overlap_all  # 5134 个 sample_id
+
+df_onco <- clinical_sample %>%
+  filter(sample_id %in% analysis_samples) %>%
+  count(oncotree_code, sort = TRUE) %>%
+  mutate(
+    oncotree_code = ifelse(is.na(oncotree_code) | oncotree_code == "", "Missing", oncotree_code)
+  ) %>%
+  slice_head(n = 15) %>%
+  mutate(oncotree_code = reorder(oncotree_code, n))
+
+p2a <- ggplot(df_onco, aes(x = oncotree_code, y = n)) +
+  geom_col(width = 0.75) +
+  geom_text(aes(label = n), hjust = -0.15, size = 4) +
+  coord_flip() +
+  scale_y_continuous(labels = comma, expand = expansion(mult = c(0, 0.15))) +
+  labs(
+    title = "Cohort composition (Top OncoTree codes)",
+    subtitle = paste0("n = ", length(analysis_samples), " samples with Clinical ∩ Mut ∩ CNA ∩ SV"),
+    x = NULL,
+    y = "Count"
+  ) +
+  theme_bw(base_size = 13) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    plot.subtitle = element_text(size = 10)
+  )
+
+p2a
+
+```
+
+```{r}
+df_meta <- clinical_sample %>%
+  filter(sample_id %in% analysis_samples) %>%
+  mutate(
+    metastatic_site = ifelse(is.na(metastatic_site) | metastatic_site == "", "Missing", metastatic_site)
+  ) %>%
+  count(metastatic_site, sort = TRUE) %>%
+  slice_head(n = 15) %>%
+  mutate(metastatic_site = reorder(metastatic_site, n))
+
+p2b <- ggplot(df_meta, aes(x = metastatic_site, y = n)) +
+  geom_col(width = 0.75) +
+  geom_text(aes(label = n), hjust = -0.15, size = 4) +
+  coord_flip() +
+  scale_y_continuous(labels = comma, expand = expansion(mult = c(0, 0.15))) +
+  labs(
+    title = "Metastatic site distribution (Top sites)",
+    subtitle = paste0("n = ", length(analysis_samples), " samples with Clinical ∩ Mut ∩ CNA ∩ SV"),
+    x = NULL,
+    y = "Count"
+  ) +
+  theme_bw(base_size = 13) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    plot.subtitle = element_text(size = 10)
+  )
+
+p2b
+
+```
+
+```{r fig3-pca, message=FALSE, warning=FALSE}
+# =========================
+# Fig 3: Feature construction (Mut + CNA + SV) + PCA visualization
+# Cohort: overlap_all (your ~5134 samples)
+# =========================
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tidyr)
+  library(stringr)
+  library(ggplot2)
+})
+
+stopifnot(exists("overlap_all"), exists("clinical_sample"), exists("mut"), exists("cna"), exists("sv"))
+
+# -------------------------
+# Step 0) cohort + labels
+# -------------------------
+analysis_ids <- str_to_upper(overlap_all)
+
+label_df <- clinical_sample %>%
+  mutate(sample_id_std = str_to_upper(sample_id)) %>%
+  filter(sample_id_std %in% analysis_ids) %>%
+  transmute(
+    sample_id_std,
+    oncotree_code = ifelse(is.na(oncotree_code) | oncotree_code == "", "Missing", as.character(oncotree_code)),
+    metastatic_site = ifelse(is.na(metastatic_site) | metastatic_site == "", "Missing", as.character(metastatic_site))
+  )
+
+cat("Cohort size:", length(analysis_ids), "\n")
+
+# -------------------------
+# Step 1) MUT features (binary presence of top mutated genes)
+# -------------------------
+mut_std <- mut %>%
+  transmute(
+    sample_id_std = str_to_upper(tumor_sample_barcode),
+    gene = hugo_symbol
+  ) %>%
+  filter(sample_id_std %in% analysis_ids) %>%
+  filter(!is.na(gene), gene != "") %>%
+  distinct(sample_id_std, gene)
+
+top_mut_genes <- mut_std %>%
+  count(gene, sort = TRUE, name = "n_samples") %>%
+  slice_head(n = 200) %>%              # can change to 100 if you want faster
+  pull(gene)
+
+mut_wide <- mut_std %>%
+  filter(gene %in% top_mut_genes) %>%
+  mutate(value = 1) %>%
+  pivot_wider(names_from = gene, values_from = value, values_fill = 0)
+
+mut_wide2 <- tibble(sample_id_std = analysis_ids) %>%
+  left_join(mut_wide, by = "sample_id_std") %>%
+  mutate(across(-sample_id_std, ~replace_na(.x, 0))) %>%
+  arrange(match(sample_id_std, analysis_ids))
+
+mut_X <- as.matrix(select(mut_wide2, -sample_id_std))
+colnames(mut_X) <- paste0("MUT_", make.names(colnames(mut_X)))
+rownames(mut_X) <- mut_wide2$sample_id_std
+
+cat("MUT matrix:", nrow(mut_X), "x", ncol(mut_X), "\n")
+
+# -------------------------
+# Step 2) CNA features (top variable genes)
+# -------------------------
+cna_cols_raw <- setdiff(names(cna), "hugo_symbol")
+
+# map CNA column name -> standardized sample id
+cna_map <- tibble(cna_col = cna_cols_raw) %>%
+  mutate(sample_id_std = str_to_upper(cna_col) %>% str_replace_all("_", "-")) %>%
+  filter(sample_id_std %in% analysis_ids)
+
+cat("CNA columns in cohort:", nrow(cna_map), "\n")
+
+# subset cna to cohort columns only
+cna_sub <- cna %>%
+  select(hugo_symbol, all_of(cna_map$cna_col))
+
+# convert to numeric matrix (genes x samples)
+cna_gene <- cna_sub$hugo_symbol
+cna_M <- as.matrix(cna_sub[, -1, drop = FALSE])
+
+# force numeric; anything non-numeric becomes NA -> later handled
+cna_M <- apply(cna_M, 2, function(x) as.numeric(x))
+
+# choose top variable genes (ignore NA)
+gene_var <- apply(cna_M, 1, var, na.rm = TRUE)
+gene_var[is.na(gene_var)] <- 0
+
+top_idx <- order(gene_var, decreasing = TRUE)[1:300]   # can reduce to 200 for speed
+cna_M2 <- cna_M[top_idx, , drop = FALSE]
+cna_gene2 <- cna_gene[top_idx]
+
+# transpose => samples x genes
+cna_X_raw <- t(cna_M2)
+rownames(cna_X_raw) <- cna_map$sample_id_std
+colnames(cna_X_raw) <- paste0("CNA_", make.names(cna_gene2))
+
+# fill full cohort order (if a cohort sample missing CNA column -> zeros)
+cna_X <- matrix(0, nrow = length(analysis_ids), ncol = ncol(cna_X_raw))
+rownames(cna_X) <- analysis_ids
+colnames(cna_X) <- colnames(cna_X_raw)
+cna_X[rownames(cna_X_raw), ] <- cna_X_raw
+
+cat("CNA matrix:", nrow(cna_X), "x", ncol(cna_X), "\n")
+
+# -------------------------
+# Step 3) SV features (total + top classes)
+# -------------------------
+sv_std <- sv %>%
+  transmute(
+    sample_id_std = str_to_upper(sample_id),
+    class = ifelse(is.na(class) | class == "", "UNKNOWN", as.character(class))
+  ) %>%
+  filter(sample_id_std %in% analysis_ids)
+
+top_sv_classes <- sv_std %>%
+  count(class, sort = TRUE) %>%
+  slice_head(n = 10) %>%
+  pull(class)
+
+sv_class <- sv_std %>%
+  filter(class %in% top_sv_classes) %>%
+  count(sample_id_std, class, name = "n") %>%
+  pivot_wider(names_from = class, values_from = n, values_fill = 0)
+
+sv_total <- sv_std %>%
+  count(sample_id_std, name = "SV_total")
+
+sv_wide2 <- tibble(sample_id_std = analysis_ids) %>%
+  left_join(sv_total, by = "sample_id_std") %>%
+  left_join(sv_class, by = "sample_id_std") %>%
+  mutate(across(-sample_id_std, ~replace_na(.x, 0))) %>%
+  arrange(match(sample_id_std, analysis_ids))
+
+sv_X <- as.matrix(select(sv_wide2, -sample_id_std))
+colnames(sv_X) <- paste0("SV_", make.names(colnames(sv_X)))
+rownames(sv_X) <- sv_wide2$sample_id_std
+
+cat("SV matrix:", nrow(sv_X), "x", ncol(sv_X), "\n")
+
+# -------------------------
+# Step 4) Combine + CLEAN (this is where svd error is fixed)
+# -------------------------
+X <- cbind(mut_X, cna_X, sv_X)
+
+# 4.1 replace NA/Inf with 0
+X[!is.finite(X)] <- NA
+X[is.na(X)] <- 0
+
+# 4.2 drop zero-variance columns (sd=0 => scale gives NaN)
+col_sd <- apply(X, 2, sd)
+keep <- which(is.finite(col_sd) & col_sd > 0)
+X2 <- X[, keep, drop = FALSE]
+
+cat("Combined X:", nrow(X), "x", ncol(X), "\n")
+cat("After drop sd=0 cols:", nrow(X2), "x", ncol(X2), "\n")
+
+# 4.3 scale
+X_scaled <- scale(X2)
+
+# final sanity
+stopifnot(all(is.finite(X_scaled)))
+
+```
+
+```{r}
+# =========================
+# Next step (for clustering + association later):
+# Build a clean sample-level label table from clinical_sample
+# Cohort: analysis_ids (= upper-case overlap_all)
+# =========================
+
+library(dplyr)
+library(stringr)
+
+stopifnot(exists("analysis_ids"), exists("clinical_sample"))
+
+# helper: pick an existing column name (in case MSK-CHORD uses slightly different naming)
+pick_col <- function(df, candidates) {
+  cand <- candidates[candidates %in% names(df)]
+  if (length(cand) == 0) return(NA_character_)
+  cand[[1]]
+}
+
+# try common column names (after janitor::clean_names)
+col_oncotree <- pick_col(clinical_sample, c("oncotree_code", "oncotree", "oncotree_code_sample"))
+col_primary  <- pick_col(clinical_sample, c("primary_site", "primary_site_sample", "primary_site_description"))
+col_meta     <- pick_col(clinical_sample, c("metastatic_site", "metastatic_site_sample"))
+col_tmb      <- pick_col(clinical_sample, c("tmb_nonsynonymous", "tmb", "tmb_score", "tmb_nonsyn"))
+col_msi      <- pick_col(clinical_sample, c("msi_type", "msi_status", "msi"))
+
+cat("Using columns:\n",
+    "oncotree:", col_oncotree, "\n",
+    "primary :", col_primary,  "\n",
+    "metast  :", col_meta,     "\n",
+    "tmb     :", col_tmb,      "\n",
+    "msi     :", col_msi,      "\n")
+
+clinical_sample_std <- clinical_sample %>%
+  mutate(sample_id_std = str_to_upper(sample_id))
+
+# label table (keep it simple + clean)
+sample_labels <- clinical_sample_std %>%
+  filter(sample_id_std %in% analysis_ids) %>%
+  transmute(
+    sample_id_std,
+    oncotree_code   = if (!is.na(col_oncotree)) as.character(.data[[col_oncotree]]) else NA_character_,
+    primary_site    = if (!is.na(col_primary))  as.character(.data[[col_primary]])  else NA_character_,
+    metastatic_site = if (!is.na(col_meta))     as.character(.data[[col_meta]])     else NA_character_,
+    tmb             = if (!is.na(col_tmb))      suppressWarnings(as.numeric(.data[[col_tmb]])) else NA_real_,
+    msi             = if (!is.na(col_msi))      as.character(.data[[col_msi]])      else NA_character_
+  ) %>%
+  mutate(
+    oncotree_code   = ifelse(is.na(oncotree_code)   | oncotree_code   == "", "Missing", oncotree_code),
+    primary_site    = ifelse(is.na(primary_site)    | primary_site    == "", "Missing", primary_site),
+    metastatic_site = ifelse(is.na(metastatic_site) | metastatic_site == "", "Missing", metastatic_site),
+    msi             = ifelse(is.na(msi)             | msi             == "", "Missing", msi)
+  ) %>%
+  distinct(sample_id_std, .keep_all = TRUE) %>%
+  arrange(match(sample_id_std, analysis_ids))
+
+# quick sanity
+stopifnot(nrow(sample_labels) == length(analysis_ids))
+dplyr::glimpse(sample_labels)
+
+# how much missing in key biomarkers?
+cat("\nMissingness in cohort:\n")
+cat("TMB missing:", sum(is.na(sample_labels$tmb)), "/", nrow(sample_labels), "\n")
+cat("MSI missing:", sum(sample_labels$msi == "Missing"), "/", nrow(sample_labels), "\n")
+```
+
+```{r}
+# =========================
+# Next step:
+# Clean / harmonize clinical labels for downstream association tests
+# - Collapse rare metastatic sites
+
+library(dplyr)
+library(stringr)
+library(forcats)
+
+stopifnot(exists("sample_labels"))
+
+lab2 <- sample_labels %>%
+  mutate(
+    # --- clean metastatic_site strings (tiny normalization) ---
+    metastatic_site = str_squish(metastatic_site),
+    metastatic_site = str_replace_all(metastatic_site, "Lymph node", "Lymph Node"),
+
+    # --- collapse metastatic_site into Top K + Other ---
+    meta_top = fct_lump_n(factor(metastatic_site), n = 8, w = NULL, other_level = "Other"),
+
+    # --- MSI: keep raw + derive a simple binary (you can refine later) ---
+    msi_raw = msi,
+    msi_bin = case_when(
+      str_detect(str_to_lower(msi_raw), "high|unstable") ~ "MSI-High/Unstable",
+      str_detect(str_to_lower(msi_raw), "stable")       ~ "MSS/Stable",
+      TRUE                                              ~ "Other/Unknown"
+    ),
+    msi_bin = factor(msi_bin, levels = c("MSS/Stable", "MSI-High/Unstable", "Other/Unknown")),
+
+    # --- TMB: keep continuous + make a simple 3-bin version for quick plots ---
+    tmb = as.numeric(tmb),
+    tmb_group = ntile(tmb, 3) %>% factor(labels = c("Low", "Mid", "High"))
+  )
+
+# quick checks
+cat("Metastatic site (Top 8 + Other):\n")
+print(table(lab2$meta_top))
+
+cat("\nMSI_bin counts:\n")
+print(table(lab2$msi_bin, useNA = "ifany"))
+
+# save for later cells
+sample_labels2 <- lab2
+
+dplyr::glimpse(sample_labels2)
+```
+
+```{r}
+# =========================
+# PCA dimension choice (practical)
+# - In high-dim genomic features, variance spreads across many PCs.
+# - For clustering, use a fixed PC dimension (e.g., 50) and later interpret clusters in original features.
+# =========================
+
+library(dplyr)
+library(ggplot2)
+
+stopifnot(exists("X_scaled"), exists("analysis_ids"), exists("sample_labels2"))
+
+pca <- prcomp(X_scaled, center = FALSE, scale. = FALSE)
+
+var_explained <- (pca$sdev^2) / sum(pca$sdev^2)
+cumvar <- cumsum(var_explained)
+
+# Plot cumulative variance for first 200 PCs
+df_var <- tibble(
+  PC = seq_along(cumvar),
+  cumvar = cumvar
+)
+
+ggplot(df_var %>% slice(1:200), aes(PC, cumvar)) +
+  geom_line() + geom_point(size = 1.0) +
+  labs(title = "Cumulative variance explained (first 200 PCs)",
+       x = "PC index", y = "Cumulative variance") +
+  theme_bw(base_size = 12)
+
+# Choose a practical PC dimension for clustering
+pc_dim <- 50   # try 50 first; later sensitivity: 30 / 80 / 100
+cat("Using PC_dim =", pc_dim,
+    " | cumvar@PC_dim =", round(cumvar[pc_dim], 3), "\n")
+
+Z_clust <- pca$x[, 1:pc_dim, drop = FALSE]
+stopifnot(all(is.finite(Z_clust)))
+
+# For plotting (PC1/PC2)
+pca_df <- tibble(
+  sample_id_std = toupper(analysis_ids),
+  PC1 = pca$x[, 1],
+  PC2 = pca$x[, 2]
+) %>%
+  left_join(sample_labels2 %>% mutate(sample_id_std = toupper(sample_id_std)),
+            by = "sample_id_std")
+
+pca_obj <- pca
+```
+
+```{r}
+# =========================
+# Step: k-means clustering on PCA space (Z_clust)
+# - We'll scan K=2..10
+# - Use (1) elbow: total within-cluster sum of squares (WSS)
+# - Use (2) silhouette: average silhouette width
+# =========================
+
+library(dplyr)
+library(ggplot2)
+
+stopifnot(exists("Z_clust"), exists("pca_df"))
+
+set.seed(1)
+
+K_grid <- 2:10
+
+# ---- elbow (WSS) ----
+wss <- sapply(K_grid, function(k) {
+  km <- kmeans(Z_clust, centers = k, nstart = 20, iter.max = 100)
+  km$tot.withinss
+})
+
+df_wss <- tibble(K = K_grid, WSS = wss)
+
+p_elbow <- ggplot(df_wss, aes(K, WSS)) +
+  geom_line() + geom_point(size = 1.6) +
+  labs(title = "Elbow plot (k-means on PCA space)", x = "K", y = "Total within-cluster SS") +
+  theme_bw(base_size = 12)
+
+print(p_elbow)
+
+# ---- silhouette (requires cluster package) ----
+if (!requireNamespace("cluster", quietly = TRUE)) {
+  message("Package 'cluster' not installed. Run: install.packages('cluster') to compute silhouette.")
+} else {
+  avg_sil <- sapply(K_grid, function(k) {
+    km <- kmeans(Z_clust, centers = k, nstart = 20, iter.max = 100)
+    sil <- cluster::silhouette(km$cluster, dist(Z_clust))
+    mean(sil[, "sil_width"])
+  })
+  
+  df_sil <- tibble(K = K_grid, avg_silhouette = avg_sil)
+  
+  p_sil <- ggplot(df_sil, aes(K, avg_silhouette)) +
+    geom_line() + geom_point(size = 1.6) +
+    labs(title = "Silhouette (k-means on PCA space)", x = "K", y = "Average silhouette width") +
+    theme_bw(base_size = 12)
+  
+  print(p_sil)
+}
+
+# ---- pick a default K for next step ----
+# (We'll revise after seeing the plots)
+K_default <- 5
+cat("Default K for next step:", K_default, "\n")
+
+km_final <- kmeans(Z_clust, centers = K_default, nstart = 50, iter.max = 200)
+
+# attach cluster labels to pca_df (for visualization)
+pca_df2 <- pca_df %>%
+  mutate(cluster = factor(km_final$cluster))
+
+# quick PCA scatter colored by cluster
+p_cluster <- ggplot(pca_df2, aes(PC1, PC2, color = cluster)) +
+  geom_point(alpha = 0.7, size = 1.2) +
+  labs(title = paste0("PCA scatter colored by k-means clusters (K=", K_default, ")"),
+       x = "PC1", y = "PC2", color = "Cluster") +
+  theme_bw(base_size = 12) +
+  theme(legend.position = "right")
+
+print(p_cluster)
+
+# keep for next cells
+km_k <- K_default
+km_fit <- km_final
+pca_with_cluster <- pca_df2
+```
+
+```{r}
+# =========================
+# Step: Run k-means on PCA space (Z_clust) and attach cluster labels
+# Inputs expected from previous cells: Z_clust, analysis_ids, pca_df, sample_labels2
+# =========================
+library(dplyr)
+library(ggplot2)
+library(knitr)
+
+stopifnot(exists("Z_clust"), exists("analysis_ids"), exists("pca_df"))
+
+K <- 5  # <- change if you want (based on your elbow/silhouette)
+set.seed(1)
+km <- kmeans(Z_clust, centers = K, nstart = 50, iter.max = 200)
+
+cluster_df <- tibble(
+  sample_id_std = analysis_ids,
+  cluster = factor(km$cluster)
+)
+
+# quick size table
+cluster_sizes <- cluster_df %>%
+  count(cluster, name = "n") %>%
+  arrange(desc(n))
+kable(cluster_sizes, caption = paste0("Cluster sizes (K=", K, ")"))
+
+# PCA scatter colored by clusters (for slides)
+p_pca_km <- pca_df %>%
+  left_join(cluster_df, by = "sample_id_std") %>%
+  ggplot(aes(PC1, PC2, color = cluster)) +
+  geom_point(alpha = 0.7, size = 1.2) +
+  labs(
+    title = paste0("PCA scatter colored by k-means clusters (K=", K, ")"),
+    subtitle = paste0("n = ", length(analysis_ids), " samples (overlap cohort)"),
+    x = "PC1", y = "PC2", color = "Cluster"
+  ) +
+  theme_bw(base_size = 13) +
+  theme(legend.position = "right")
+
+p_pca_km
+
+# keep for next steps
+km_obj <- km
+cluster_assignments <- cluster_df
+```
+
+```{r}
+# =========================
+# Step: Clinical association checks (Cluster vs OncoTree / primary / metastatic / TMB / MSI)
+# Inputs expected: cluster_assignments, sample_labels2  (your 5134 x 6 table)
+# =========================
+library(dplyr)
+library(ggplot2)
+library(knitr)
+
+stopifnot(exists("cluster_assignments"), exists("sample_labels2"))
+
+df <- sample_labels2 %>%
+  left_join(cluster_assignments, by = "sample_id_std") %>%
+  mutate(
+    cluster = factor(cluster),
+    oncotree_code   = ifelse(is.na(oncotree_code) | oncotree_code == "", "Missing", oncotree_code),
+    primary_site    = ifelse(is.na(primary_site) | primary_site == "", "Missing", primary_site),
+    metastatic_site = ifelse(is.na(metastatic_site) | metastatic_site == "", "Missing", metastatic_site),
+    msi             = ifelse(is.na(msi) | msi == "", "Missing", msi)
+  )
+
+# -------------------------
+# 1) Cluster vs OncoTree (chi-square)
+# -------------------------
+tab_onco <- table(df$cluster, df$oncotree_code)
+chi_onco <- chisq.test(tab_onco)
+
+cat("Chi-square test: cluster vs oncotree_code\n")
+cat("p-value:", signif(chi_onco$p.value, 3), "\n\n")
+
+# show top OncoTree composition by cluster (top 8 per cluster)
+onco_top <- df %>%
+  count(cluster, oncotree_code, name = "n") %>%
+  group_by(cluster) %>%
+  mutate(pct = n / sum(n)) %>%
+  arrange(cluster, desc(n)) %>%
+  slice_head(n = 8) %>%
+  ungroup()
+
+kable(onco_top, digits = 3, caption = "Top OncoTree codes within each cluster (top 8)")
+
+# quick stacked bar (top 12 oncotree overall)
+top12_onco <- df %>% count(oncotree_code, sort = TRUE) %>% slice_head(n = 12) %>% pull(oncotree_code)
+p_onco <- df %>%
+  mutate(oncotree_top = ifelse(oncotree_code %in% top12_onco, oncotree_code, "Other")) %>%
+  count(cluster, oncotree_top) %>%
+  group_by(cluster) %>%
+  mutate(pct = n / sum(n)) %>%
+  ungroup() %>%
+  ggplot(aes(x = cluster, y = pct, fill = oncotree_top)) +
+  geom_col() +
+  labs(title = "Cluster composition by OncoTree (top 12 + Other)", x = "Cluster", y = "Within-cluster proportion", fill = "OncoTree") +
+  theme_bw(base_size = 12)
+p_onco
+
+# -------------------------
+# 2) Cluster vs Metastatic site (chi-square)
+# -------------------------
+tab_meta <- table(df$cluster, df$metastatic_site)
+chi_meta <- chisq.test(tab_meta)
+
+cat("\nChi-square test: cluster vs metastatic_site\n")
+cat("p-value:", signif(chi_meta$p.value, 3), "\n")
+
+# top metastatic sites per cluster (top 8)
+meta_top <- df %>%
+  count(cluster, metastatic_site, name = "n") %>%
+  group_by(cluster) %>%
+  mutate(pct = n / sum(n)) %>%
+  arrange(cluster, desc(n)) %>%
+  slice_head(n = 8) %>%
+  ungroup()
+
+kable(meta_top, digits = 3, caption = "Top metastatic sites within each cluster (top 8)")
+
+# -------------------------
+# 3) Cluster vs TMB (boxplot + Kruskal-Wallis)
+# -------------------------
+# (TMB is continuous; use non-parametric test for safety)
+kw_tmb <- kruskal.test(tmb ~ cluster, data = df)
+
+cat("\nKruskal-Wallis: TMB across clusters\n")
+cat("p-value:", signif(kw_tmb$p.value, 3), "\n")
+
+p_tmb <- ggplot(df, aes(x = cluster, y = tmb)) +
+  geom_boxplot(outlier.alpha = 0.25) +
+  labs(title = "TMB distribution by cluster", x = "Cluster", y = "TMB (nonsynonymous)") +
+  theme_bw(base_size = 12)
+p_tmb
+
+# -------------------------
+# 4) Cluster vs MSI (chi-square)
+# -------------------------
+df_msi <- df %>% filter(msi != "Do not report")  # comment out if you want to keep it
+tab_msi <- table(df_msi$cluster, df_msi$msi)
+chi_msi <- chisq.test(tab_msi)
+
+cat("\nChi-square test: cluster vs MSI (excluding 'Do not report')\n")
+cat("p-value:", signif(chi_msi$p.value, 3), "\n")
+
+# keep results for report
+assoc_results <- list(
+  chi_onco = chi_onco,
+  chi_meta = chi_meta,
+  kw_tmb   = kw_tmb,
+  chi_msi  = chi_msi
+)
+```
+
+```{r}
+library(dplyr)
+library(ggplot2)
+
+stopifnot(exists("df"))
+
+p_meta <- df %>%
+  mutate(meta_plot = as.character(meta_top)) %>%
+  count(cluster, meta_plot) %>%
+  group_by(cluster) %>%
+  mutate(pct = n / sum(n)) %>%
+  ungroup() %>%
+  ggplot(aes(x = cluster, y = pct, fill = meta_plot)) +
+  geom_col() +
+  labs(
+    title = "Cluster composition by metastatic site (Top 8 + Other)",
+    x = "Cluster", y = "Within-cluster proportion", fill = "Metastatic site"
+  ) +
+  theme_bw(base_size = 12)
+
+p_meta
+```
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(knitr)
+
+stopifnot(exists("analysis_ids"), exists("mut"), exists("cna"), exists("sv"))
+stopifnot(exists("km"))  
+cluster_df <- tibble(
+  sample_id_std = analysis_ids,
+  cluster = factor(km$cluster)
+)
+
+# quick sanity
+kable(cluster_df %>% count(cluster, name="n") %>% arrange(desc(n)),
+      caption = "Cluster sizes (from km$cluster)")
+```
+
+```{r}
+ls()
+```
+
+```{r}
+# =========================
+# Next step (Final project): Interpret clusters biologically
+# 1) Top mutated genes per cluster (within-cluster frequency)
+# 2) CNA burden per sample (FULL 702 genes) + by-cluster boxplots
+# 3) SV class patterns by cluster (mean counts)
+# Requires existing objects: analysis_ids, mut, cna, sv, cluster_assignments
+# =========================
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tidyr)
+  library(stringr)
+  library(ggplot2)
+  library(forcats)
+  library(scales)
+})
+
+stopifnot(exists("analysis_ids"), exists("mut"), exists("cna"), exists("sv"), exists("cluster_assignments"))
+
+# Ensure cluster table exists and is aligned
+cluster_df <- cluster_assignments %>%
+  mutate(sample_id_std = str_to_upper(sample_id_std),
+         cluster = factor(cluster)) %>%
+  arrange(match(sample_id_std, str_to_upper(analysis_ids)))
+
+stopifnot(nrow(cluster_df) == length(analysis_ids))
+
+# ------------------------------------------------------------
+# (A) Top mutated genes per cluster (within-cluster frequency)
+# ------------------------------------------------------------
+mut_long <- mut %>%
+  transmute(
+    sample_id_std = str_to_upper(tumor_sample_barcode),
+    gene = hugo_symbol
+  ) %>%
+  filter(sample_id_std %in% str_to_upper(analysis_ids),
+         !is.na(gene), gene != "") %>%
+  distinct(sample_id_std, gene) %>%
+  inner_join(cluster_df, by = "sample_id_std")
+
+cluster_sizes <- cluster_df %>% count(cluster, name = "cluster_n")
+
+# Top 10 genes within each cluster by pct of samples mutated
+top_genes_by_cluster <- mut_long %>%
+  count(cluster, gene, name = "n_mut_samples") %>%
+  left_join(cluster_sizes, by = "cluster") %>%
+  mutate(pct = n_mut_samples / cluster_n) %>%
+  group_by(cluster) %>%
+  arrange(desc(pct), desc(n_mut_samples)) %>%
+  slice_head(n = 10) %>%
+  ungroup()
+
+# Plot: faceted bars (pct within cluster)
+p_mut <- top_genes_by_cluster %>%
+  mutate(gene = fct_reorder(gene, pct)) %>%
+  ggplot(aes(x = pct, y = gene)) +
+  geom_col(width = 0.75) +
+  facet_wrap(~ cluster, scales = "free_y", nrow = 1) +
+  scale_x_continuous(labels = percent_format(accuracy = 1)) +
+  labs(
+    title = "Top mutated genes by cluster (within-cluster frequency)",
+    x = "% of samples in cluster with a mutation in gene",
+    y = NULL
+  ) +
+  theme_bw(base_size = 12)
+
+print(p_mut)
+
+# ------------------------------------------------------------
+# (B) CNA burden (FULL 702 genes) + by-cluster boxplots
+# ------------------------------------------------------------
+# Map CNA columns to standardized sample IDs
+cna_cols_raw <- setdiff(names(cna), "hugo_symbol")
+cna_map_full <- tibble(cna_col = cna_cols_raw) %>%
+  mutate(sample_id_std = str_to_upper(cna_col) %>% str_replace_all("_", "-")) %>%
+  filter(sample_id_std %in% str_to_upper(analysis_ids))
+
+# Subset CNA to overlap cohort columns only
+cna_full <- cna %>% select(hugo_symbol, all_of(cna_map_full$cna_col))
+
+# Convert to numeric matrix (genes x samples). 702 x 5134-ish
+cna_M_full <- as.matrix(cna_full[, -1, drop = FALSE])
+cna_M_full <- apply(cna_M_full, 2, suppressWarnings(as.numeric))
+cna_M_full[!is.finite(cna_M_full)] <- NA
+
+# Burden per sample (over 702 genes)
+cna_burden <- tibble(
+  cna_col = colnames(cna_M_full),
+  amp_n   = colSums(cna_M_full > 0, na.rm = TRUE),
+  del_n   = colSums(cna_M_full < 0, na.rm = TRUE),
+  abs_sum = colSums(abs(cna_M_full), na.rm = TRUE)
+) %>%
+  left_join(cna_map_full, by = "cna_col") %>%
+  select(sample_id_std, amp_n, del_n, abs_sum) %>%
+  right_join(cluster_df, by = "sample_id_std")
+
+# Boxplots
+p_cna_amp <- ggplot(cna_burden, aes(x = cluster, y = amp_n)) +
+  geom_boxplot(outlier.alpha = 0.2) +
+  labs(title = "CNA burden by cluster: #amplified genes (>0)", x = "Cluster", y = "Amp count") +
+  theme_bw(base_size = 12)
+
+p_cna_del <- ggplot(cna_burden, aes(x = cluster, y = del_n)) +
+  geom_boxplot(outlier.alpha = 0.2) +
+  labs(title = "CNA burden by cluster: #deleted genes (<0)", x = "Cluster", y = "Del count") +
+  theme_bw(base_size = 12)
+
+p_cna_abs <- ggplot(cna_burden, aes(x = cluster, y = abs_sum)) +
+  geom_boxplot(outlier.alpha = 0.2) +
+  labs(title = "CNA burden by cluster: sum(abs(CNA)) across 702 genes", x = "Cluster", y = "Sum abs(CNA)") +
+  theme_bw(base_size = 12)
+
+print(p_cna_amp)
+print(p_cna_del)
+print(p_cna_abs)
+
+# ------------------------------------------------------------
+# (C) SV class patterns by cluster (mean counts per sample)
+# ------------------------------------------------------------
+sv_long <- sv %>%
+  transmute(
+    sample_id_std = str_to_upper(sample_id),
+    class = ifelse(is.na(class) | class == "", "UNKNOWN", as.character(class))
+  ) %>%
+  filter(sample_id_std %in% str_to_upper(analysis_ids)) %>%
+  inner_join(cluster_df, by = "sample_id_std")
+
+# Count SV events per sample-class
+sv_counts <- sv_long %>%
+  count(cluster, sample_id_std, class, name = "n")
+
+# Mean per sample within cluster
+sv_mean <- sv_counts %>%
+  group_by(cluster, class) %>%
+  summarise(mean_count = mean(n), .groups = "drop")
+
+# For readability, take top 8 classes by overall mean
+top_sv_classes_overall <- sv_mean %>%
+  group_by(class) %>%
+  summarise(overall_mean = mean(mean_count), .groups = "drop") %>%
+  arrange(desc(overall_mean)) %>%
+  slice_head(n = 8) %>%
+  pull(class)
+
+p_sv <- sv_mean %>%
+  filter(class %in% top_sv_classes_overall) %>%
+  mutate(class = fct_reorder(class, mean_count)) %>%
+  ggplot(aes(x = mean_count, y = class)) +
+  geom_col(width = 0.75) +
+  facet_wrap(~ cluster, scales = "free_y", nrow = 1) +
+  labs(
+    title = "SV class patterns by cluster (mean #events per sample)",
+    x = "Mean SV count per sample",
+    y = NULL
+  ) +
+  theme_bw(base_size = 12)
+
+print(p_sv)
+```
+
+```{r}
+
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tidyr)
+  library(ggplot2)
+  library(stringr)
+})
+
+stopifnot(exists("sample_labels2"), exists("cluster_assignments"))
+
+# 0) rebuild analysis df (same as your association cell)
+df <- sample_labels2 %>%
+  left_join(cluster_assignments, by = "sample_id_std") %>%
+  mutate(
+    cluster = factor(cluster),
+    oncotree_code = as.character(oncotree_code),
+    meta_top = if ("meta_top" %in% names(.)) as.character(meta_top) else as.character(metastatic_site),
+    meta_top = ifelse(is.na(meta_top) | meta_top == "", "Missing", meta_top)
+  )
+
+n_total <- nrow(df)
+cat("n =", n_total, "\n")
+
+# helper: Cramer's V from a contingency table
+cramers_v <- function(tab) {
+  chi <- suppressWarnings(chisq.test(tab, correct = FALSE))
+  n <- sum(tab)
+  r <- nrow(tab); c <- ncol(tab)
+  v <- sqrt(as.numeric(chi$statistic) / (n * (min(r - 1, c - 1))))
+  list(V = v, chi = chi)
+}
+
+# helper: standardized residuals table (for heatmap)
+std_residual_df <- function(tab, row_name = "row", col_name = "col") {
+  chi <- suppressWarnings(chisq.test(tab, correct = FALSE))
+  res <- chi$stdres
+  out <- as.data.frame(as.table(res))
+  names(out) <- c(row_name, col_name, "stdres")
+  out
+}
+
+# -------------------------
+# 1) Cluster vs OncoTree (use top 12 + Other to stabilize)
+# -------------------------
+top12_onco <- df %>% count(oncotree_code, sort = TRUE) %>% slice_head(n = 12) %>% pull(oncotree_code)
+df_onco <- df %>%
+  mutate(oncotree_top = ifelse(oncotree_code %in% top12_onco, oncotree_code, "Other"))
+
+tab_onco <- table(df_onco$cluster, df_onco$oncotree_top)
+onco_stats <- cramers_v(tab_onco)
+cat("\nCluster vs OncoTree (top12+Other):\n")
+cat("  p =", signif(onco_stats$chi$p.value, 3), "\n")
+cat("  Cramer's V =", round(onco_stats$V, 3), "\n")
+
+p_onco_res <- std_residual_df(tab_onco, "cluster", "oncotree") %>%
+  ggplot(aes(x = oncotree, y = cluster, fill = stdres)) +
+  geom_tile() +
+  geom_text(aes(label = ifelse(abs(stdres) >= 2, sprintf("%.1f", stdres), "")), size = 3) +
+  labs(
+    title = "Where OncoTree differs by cluster (standardized residuals)",
+    subtitle = "Cells with |residual| ≥ 2 drive the chi-square signal",
+    x = "OncoTree (top 12 + Other)", y = "Cluster", fill = "Std. resid"
+  ) +
+  theme_bw(base_size = 12) +
+  theme(axis.text.x = element_text(angle = 35, hjust = 1))
+print(p_onco_res)
+
+# -------------------------
+# 2) Cluster vs metastatic site (use meta_top = Top8 + Other if present)
+# -------------------------
+# ensure meta_top is "Top 8 + Other" (if you already created it, this keeps it; otherwise we create it here)
+meta_counts <- df %>% count(meta_top, sort = TRUE)
+top8_meta <- meta_counts %>% slice_head(n = 8) %>% pull(meta_top)
+
+df_meta <- df %>%
+  mutate(meta_top2 = ifelse(meta_top %in% top8_meta, meta_top, "Other"))
+
+tab_meta <- table(df_meta$cluster, df_meta$meta_top2)
+meta_stats <- cramers_v(tab_meta)
+cat("\nCluster vs Metastatic site (top8+Other):\n")
+cat("  p =", signif(meta_stats$chi$p.value, 3), "\n")
+cat("  Cramer's V =", round(meta_stats$V, 3), "\n")
+
+p_meta_res <- std_residual_df(tab_meta, "cluster", "metast_site") %>%
+  ggplot(aes(x = metast_site, y = cluster, fill = stdres)) +
+  geom_tile() +
+  geom_text(aes(label = ifelse(abs(stdres) >= 2, sprintf("%.1f", stdres), "")), size = 3) +
+  labs(
+    title = "Where metastatic site differs by cluster (standardized residuals)",
+    subtitle = "Cells with |residual| ≥ 2 drive the chi-square signal",
+    x = "Metastatic site (top 8 + Other)", y = "Cluster", fill = "Std. resid"
+  ) +
+  theme_bw(base_size = 12) +
+  theme(axis.text.x = element_text(angle = 35, hjust = 1))
+print(p_meta_res)
+
+# -------------------------
+# 3) TMB across clusters: effect size + a compact summary plot
+# -------------------------
+df_tmb <- df %>% filter(!is.na(tmb))
+kw <- kruskal.test(tmb ~ cluster, data = df_tmb)
+
+# epsilon-squared for Kruskal-Wallis (simple, interpretable effect size)
+# eps^2 = (H - k + 1) / (n - k)
+H <- as.numeric(kw$statistic)
+k <- nlevels(df_tmb$cluster)
+n <- nrow(df_tmb)
+eps2 <- (H - k + 1) / (n - k)
+
+cat("\nTMB across clusters:\n")
+cat("  Kruskal-Wallis p =", signif(kw$p.value, 3), "\n")
+cat("  Epsilon-squared =", round(eps2, 3), "\n")
+
+tmb_sum <- df_tmb %>%
+  group_by(cluster) %>%
+  summarise(
+    n = n(),
+    median = median(tmb),
+    q1 = quantile(tmb, 0.25),
+    q3 = quantile(tmb, 0.75),
+    .groups = "drop"
+  )
+
+p_tmb_sum <- ggplot(tmb_sum, aes(x = cluster, y = median)) +
+  geom_point(size = 2) +
+  geom_errorbar(aes(ymin = q1, ymax = q3), width = 0.15) +
+  labs(
+    title = "TMB by cluster (median and IQR)",
+    subtitle = paste0("Kruskal-Wallis p=", signif(kw$p.value, 3),
+                      " | epsilon^2=", round(eps2, 3)),
+    x = "Cluster", y = "TMB (nonsynonymous)"
+  ) +
+  theme_bw(base_size = 12)
+print(p_tmb_sum)
+
+# -------------------------
+# 4) why chi-square warning
+# -------------------------
+min_expected_onco <- min(onco_stats$chi$expected)
+min_expected_meta <- min(meta_stats$chi$expected)
+cat("\nChi-square expected count diagnostics:\n")
+cat("  min expected (OncoTree tab) =", round(min_expected_onco, 3), "\n")
+cat("  min expected (Met site tab) =", round(min_expected_meta, 3), "\n")
+cat("If min expected is very small (<5), chi-square approximation warnings are expected (rare clusters / rare labels).\n")
+```
