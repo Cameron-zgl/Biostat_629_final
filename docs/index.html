@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Genomic Abnormality Patterns in MSK-CHORD</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="hero">
+    <div class="container">
+      <p class="eyebrow">Final Project</p>
+      <h1>Genomic Abnormality Patterns and Clinical Associations in MSK-CHORD</h1>
+      <p class="subtitle">
+        Integrating somatic mutations, copy-number alterations, structural variants, and clinical variables
+        to identify interpretable genomic abnormality clusters.
+      </p>
+      <div class="links">
+        <a href="https://github.com/YOUR_USERNAME/YOUR_REPO_NAME" target="_blank">Reproducibility Repository</a>
+        <a href="#results">Main Results</a>
+      </div>
+    </div>
+  </header>
+
+  <main class="container">
+    <section>
+      <h2>Research Question</h2>
+      <p>
+        Do integrated Mut+CNA+SV abnormality patterns define distinct clusters, and are these clusters
+        associated with clinical variables such as cancer type, metastatic site, tumor mutational burden (TMB),
+        and microsatellite instability (MSI)?
+      </p>
+    </section>
+
+    <section>
+      <h2>Data and Cohort</h2>
+      <p>
+        This project uses the MSK-CHORD 2024 cohort from cBioPortal DataHub. The analysis integrates four files:
+        clinical sample data, mutation data, CNA data, and structural variant data. The final overlap cohort contains
+        samples present across all required genomic and clinical tables.
+      </p>
+      <div class="note">
+        Raw MSK-CHORD data are not uploaded to this website. The reproducible R Markdown file reads the data directly
+        from the cBioPortal DataHub GitHub repository.
+      </div>
+    </section>
+
+    <section>
+      <h2>Methods</h2>
+      <div class="cards">
+        <div class="card">
+          <h3>Feature Construction</h3>
+          <p>
+            Mutation features were encoded as binary top-gene indicators. CNA features were summarized from
+            gene-level copy-number profiles. SV features included event counts and major SV classes.
+          </p>
+        </div>
+        <div class="card">
+          <h3>Dimensionality Reduction</h3>
+          <p>
+            Features were standardized and reduced using PCA before clustering to improve stability in a
+            high-dimensional sparse genomic feature space.
+          </p>
+        </div>
+        <div class="card">
+          <h3>Clustering and Testing</h3>
+          <p>
+            K-means clustering was applied in PCA space. Associations with OncoTree cancer type, metastatic site,
+            and TMB were evaluated using chi-square and Kruskal-Wallis tests with effect sizes.
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <section id="results">
+      <h2>Main Results</h2>
+      <ul class="results-list">
+        <li>The final clustering solution used <strong>K = 5</strong>.</li>
+        <li>Cluster assignment was associated with <strong>OncoTree cancer type</strong>, with a moderate effect size.</li>
+        <li>Cluster assignment was also associated with <strong>metastatic site</strong>, but with a smaller effect size.</li>
+        <li><strong>TMB differed across clusters</strong>, suggesting that the clusters capture clinically relevant mutational burden variation.</li>
+      </ul>
+
+      <figure>
+        <img src="figures/fig_assoc_summary_effectsizes.png" alt="Association summary effect sizes" />
+        <figcaption>Association test summary with p-values and effect sizes.</figcaption>
+      </figure>
+
+      <figure>
+        <img src="figures/fig_top_mut_genes_by_cluster.png" alt="Top mutated genes by cluster" />
+        <figcaption>Top mutated genes by cluster, based on within-cluster mutation frequency.</figcaption>
+      </figure>
+
+      <figure>
+        <img src="figures/fig_cna_burden_abs.png" alt="CNA burden by cluster" />
+        <figcaption>CNA burden by cluster, measured using total absolute CNA burden.</figcaption>
+      </figure>
+    </section>
+
+    <section>
+      <h2>Conclusion</h2>
+      <p>
+        Integrated genomic abnormality patterns in MSK-CHORD are clinically meaningful, especially with respect to
+        cancer type and TMB. However, cluster imbalance and cancer-type composition should be considered when
+        interpreting these results. Future work should include robustness checks and within-cancer-type clustering.
+      </p>
+    </section>
+  </main>
+
+  <footer>
+    <div class="container">
+      <p>
+        Data source:
+        <a href="https://github.com/cBioPortal/datahub/tree/master/public/msk_chord_2024" target="_blank">
+          cBioPortal DataHub MSK-CHORD 2024
+        </a>
+      </p>
+      <p>
+        Replace <code>YOUR_USERNAME/YOUR_REPO_NAME</code> in this page with your actual GitHub repository.
+      </p>
+    </div>
+  </footer>
+</body>
+</html>
